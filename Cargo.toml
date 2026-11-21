@@ -1,0 +1,54 @@
+[package]
+name = "iphone-whatsapp-media-extractor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Extract WhatsApp media from an iPhone backup into per-chat folders with correct dates"
+license = "MIT"
+repository = "https://github.com/phanshiyu/iphone-whatsapp-media-extractor"
+readme = "README.md"
+keywords = ["whatsapp", "iphone", "backup", "media", "ios"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+aes = "0.9.4"
+anyhow = "1.0.104"
+chrono = "0.4.45"
+clap = { version = "4.6.9", features = ["derive", "env"] }
+ctrlc = { version = "3.5.3", features = ["termination"] }
+libc = "0.2.191"
+pbkdf2 = { version = "0.13.0", features = ["hmac"] }
+plist = "1.10.4"
+rpassword = "7.5.5"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+sha1 = "0.11.0"
+sha2 = "0.11.1"
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+undocumented_unsafe_blocks = "warn"
+allow_attributes_without_reason = "warn"
+# Transitive dependency version duplication is outside our control.
+multiple_crate_versions = "allow"
+# Fallible functions return anyhow errors that already carry context.
+missing_errors_doc = "allow"
