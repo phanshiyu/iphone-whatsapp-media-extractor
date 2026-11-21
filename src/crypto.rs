@@ -40,7 +40,7 @@ fn xor_counter(a: &[u8], t: usize) -> Option<[u8; 8]> {
 /// integrity check fails (i.e. the wrong key was used).
 #[must_use]
 pub fn aes_unwrap(kek: &[u8], wrapped: &[u8]) -> Option<Vec<u8>> {
-    if wrapped.len() < 24 || wrapped.len() % 8 != 0 {
+    if wrapped.len() < 24 || !wrapped.len().is_multiple_of(8) {
         return None;
     }
     let aes = cipher(kek).ok()?;
@@ -67,7 +67,7 @@ pub fn aes_unwrap(kek: &[u8], wrapped: &[u8]) -> Option<Vec<u8>> {
 /// # Errors
 /// Fails if the KEK is not 32 bytes or the key is not a multiple of 8 bytes (>= 16).
 pub fn aes_wrap(kek: &[u8], key: &[u8]) -> Result<Vec<u8>> {
-    if key.len() < 16 || key.len() % 8 != 0 {
+    if key.len() < 16 || !key.len().is_multiple_of(8) {
         bail!("key to wrap must be a multiple of 8 bytes, at least 16");
     }
     let aes = cipher(kek)?;
@@ -173,7 +173,7 @@ pub fn cbc_decrypt_stream(
         if buf.is_empty() {
             break;
         }
-        if buf.len() % 16 != 0 {
+        if !buf.len().is_multiple_of(16) {
             bail!("encrypted data length is not a multiple of the AES block size");
         }
         for chunk in buf.chunks_exact_mut(16) {

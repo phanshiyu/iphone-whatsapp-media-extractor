@@ -1,7 +1,8 @@
 //! Output naming, sanitising, timestamps and optional exiftool tagging.
 
 use crate::whatsapp::MediaRecord;
-use chrono::{DateTime, Local, Utc};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::Path;
@@ -103,12 +104,13 @@ fn sender_label(r: &MediaRecord) -> String {
 /// Format a Unix time in UTC or local time.
 #[must_use]
 pub fn format_time(unix: i64, utc: bool, pattern: &str) -> String {
-    let dt: DateTime<Utc> = DateTime::from_timestamp(unix, 0).unwrap_or_default();
-    if utc {
-        dt.format(pattern).to_string()
+    let ts = Timestamp::from_second(unix).unwrap_or_default();
+    let tz = if utc {
+        TimeZone::UTC
     } else {
-        dt.with_timezone(&Local).format(pattern).to_string()
-    }
+        TimeZone::system()
+    };
+    ts.to_zoned_datetime(tz).strftime(pattern).to_string()
 }
 
 /// Decide folder and file names for every record. `records` must already be

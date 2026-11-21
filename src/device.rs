@@ -119,7 +119,12 @@ pub fn find_backup(path: &Path) -> Result<PathBuf> {
         return Ok(path.to_owned());
     }
     let mut found: Vec<PathBuf> = fs::read_dir(path)
-        .with_context(|| format!("cannot read {}", path.display()))?
+        .map_err(|e| {
+            anyhow!(crate::backup::access_context(
+                &e,
+                &format!("cannot read {}", path.display())
+            ))
+        })?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.join("Manifest.plist").is_file())
         .collect();

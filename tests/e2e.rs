@@ -1,5 +1,5 @@
 //! End-to-end tests against synthetic unencrypted and encrypted backups.
-#![expect(
+#![allow(
     clippy::unwrap_used,
     reason = "test helpers; clippy.toml only exempts #[test] functions"
 )]

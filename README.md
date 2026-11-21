@@ -54,7 +54,7 @@ iphone-whatsapp-media-extractor ~/WhatsAppMedia --backup "$HOME/Library/Applicat
 
 `--backup` accepts the `<UDID>` folder itself, or the parent `Backup` folder if it holds exactly one backup (otherwise the backups are listed so you can choose).
 
-On macOS, Finder/iTunes backups live in `~/Library/Application Support/MobileSync/Backup/<UDID>`. Reading that folder needs Full Disk Access for your terminal (System Settings > Privacy & Security > Full Disk Access).
+On macOS, Finder/iTunes backups live in `~/Library/Application Support/MobileSync/Backup/<UDID>`. Reading that folder needs Full Disk Access for your terminal (System Settings > Privacy & Security > Full Disk Access; quit and reopen the terminal afterwards). If access is denied and stderr is a terminal, the tool opens that settings pane for you. Device mode (running without `--backup`) does not need Full Disk Access, because it writes its own backup to a temp folder.
 
 Encrypted backups work: you are prompted for the password, or pass `--password` / set `IWME_PASSWORD`. The backup is only ever read.
 
