@@ -1,3 +1,7 @@
+[graph]
+# Only macOS is shipped; Linux-only deps (e.g. rfd's xdg-portal/zbus) are not part of any release.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+
 [advisories]
 version = 2
 
