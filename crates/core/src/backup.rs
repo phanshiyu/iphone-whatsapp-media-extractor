@@ -1,6 +1,7 @@
 //! Reading an iOS (Finder/iTunes) backup: manifest, file lookup, decryption.
 
 use crate::crypto::cbc_decrypt_stream;
+use crate::error::access_error;
 use crate::keybag::{ClassKeys, Keybag};
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
@@ -33,42 +34,15 @@ pub struct Backup {
     _manifest_tmp: Option<NamedTempFile>,
 }
 
-/// Add a Full Disk Access hint to an access error when macOS denied it.
-///
-/// When stderr is a terminal this also opens the relevant System Settings
-/// pane (best effort) and says so.
-pub(crate) fn access_context(err: &io::Error, what: &str) -> String {
-    let base = format!("{what}: {err}");
-    if err.kind() != io::ErrorKind::PermissionDenied || !cfg!(target_os = "macos") {
-        return base;
-    }
-    let mut msg = format!(
-        "{base}\nmacOS blocks access to iPhone backups by default: give your terminal app Full \
-         Disk Access in System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access, \
-         then quit and reopen the terminal. (Device mode, i.e. running without --backup, does \
-         not need Full Disk Access because it writes its own backup to a temp folder.)"
-    );
-    if io::IsTerminal::is_terminal(&io::stderr()) {
-        let opened = std::process::Command::new("open")
-            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if opened {
-            msg.push_str("\nI opened the Full Disk Access settings pane for you.");
-        }
-    }
-    msg
-}
-
 fn read_manifest_plist(dir: &Path) -> Result<plist::Dictionary> {
     let path = dir.join("Manifest.plist");
     let file = File::open(&path).map_err(|e| {
-        anyhow!(
-            "{} (is this an iPhone backup folder?)",
-            access_context(&e, &format!("cannot read {}", path.display()))
-        )
+        let what = format!("cannot read {}", path.display());
+        if e.kind() == io::ErrorKind::PermissionDenied {
+            access_error(e, &what)
+        } else {
+            anyhow!("{what}: {e} (is this an iPhone backup folder?)")
+        }
     })?;
     let value = plist::Value::from_reader(BufReader::new(file))
         .with_context(|| format!("cannot parse {}", path.display()))?;
@@ -139,12 +113,8 @@ impl Backup {
             .unwrap_blob(manifest_key)
             .context("cannot unwrap the Manifest.db key")?;
         let tmp = NamedTempFile::new().context("cannot create temp file for Manifest.db")?;
-        let input = File::open(&manifest_path).map_err(|e| {
-            anyhow!(access_context(
-                &e,
-                &format!("cannot open {}", manifest_path.display())
-            ))
-        })?;
+        let input = File::open(&manifest_path)
+            .map_err(|e| access_error(e, &format!("cannot open {}", manifest_path.display())))?;
         cbc_decrypt_stream(
             &key,
             BufReader::new(input),
@@ -194,12 +164,8 @@ impl Backup {
     /// Returns the number of bytes written.
     pub fn copy_file_to(&self, entry: &FileEntry, dest: &Path) -> Result<u64> {
         let src = self.stored_path(entry);
-        let input = File::open(&src).map_err(|e| {
-            anyhow!(access_context(
-                &e,
-                &format!("cannot open {}", src.display())
-            ))
-        })?;
+        let input = File::open(&src)
+            .map_err(|e| access_error(e, &format!("cannot open {}", src.display())))?;
         let mut part = dest.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);

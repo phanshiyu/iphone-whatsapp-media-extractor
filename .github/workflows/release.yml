@@ -30,42 +30,48 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build aarch64
-        run: cargo build --release --locked --target aarch64-apple-darwin
-
-      - name: Build x86_64
-        run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Build
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked --target "$target" -p iphone-whatsapp-media-extractor -p iwme-app
+          done
 
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          APP_NAME="iPhone WhatsApp Media Extractor"
           mkdir -p dist universal
 
-          lipo -create \
-            "target/aarch64-apple-darwin/release/${BIN}" \
-            "target/x86_64-apple-darwin/release/${BIN}" \
-            -output "universal/${BIN}"
-          lipo -info "universal/${BIN}"
+          for bin in "${BIN}" iwme-app; do
+            lipo -create \
+              "target/aarch64-apple-darwin/release/${bin}" \
+              "target/x86_64-apple-darwin/release/${bin}" \
+              -output "universal/${bin}"
+            lipo -info "universal/${bin}"
+          done
 
-          package() {
-            local name="$1" binary="$2"
-            local dir="dist/${name}"
-            mkdir -p "${dir}"
-            cp "${binary}" "${dir}/${BIN}"
-            chmod +x "${dir}/${BIN}"
-            cp README.md LICENSE "${dir}/"
-            tar -C dist -czf "dist/${name}.tar.gz" "${name}"
-            rm -rf "${dir}"
-          }
+          # App bundle (ad-hoc signed), zip and dmg
+          scripts/bundle-macos.sh universal/iwme-app "${VERSION}" universal
+          ditto -c -k --keepParent "universal/${APP_NAME}.app" "dist/iPhone-WhatsApp-Media-Extractor-macos.zip"
+          mkdir -p dmg
+          cp -R "universal/${APP_NAME}.app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "${APP_NAME}" -srcfolder dmg -ov -format UDZO \
+            "dist/iPhone-WhatsApp-Media-Extractor-macos.dmg"
 
-          package "${BIN}-${TAG}-macos-universal" "universal/${BIN}"
-          package "${BIN}-${TAG}-macos-aarch64" "target/aarch64-apple-darwin/release/${BIN}"
-          package "${BIN}-${TAG}-macos-x86_64" "target/x86_64-apple-darwin/release/${BIN}"
+          # CLI tarball
+          name="${BIN}-macos-universal"
+          mkdir -p "dist/${name}"
+          cp "universal/${BIN}" README.md LICENSE "dist/${name}/"
+          chmod +x "dist/${name}/${BIN}"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          rm -rf "dist/${name}"
 
           cd dist
-          for f in *.tar.gz; do shasum -a 256 "$f" > "$f.sha256"; done
+          for f in *.zip *.dmg *.tar.gz; do shasum -a 256 "$f" > "$f.sha256"; done
           ls -l
 
       - name: Publish GitHub Release
@@ -74,6 +80,8 @@ jobs:
         with:
           generate_release_notes: true
           files: |
+            dist/*.zip
+            dist/*.dmg
             dist/*.tar.gz
             dist/*.sha256
 

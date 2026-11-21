@@ -46,10 +46,7 @@ pub fn aes_unwrap(kek: &[u8], wrapped: &[u8]) -> Option<Vec<u8>> {
     let aes = cipher(kek).ok()?;
     let n = wrapped.len() / 8 - 1;
     let mut a: [u8; 8] = wrapped[..8].try_into().ok()?;
-    let mut regs: Vec<[u8; 8]> = wrapped[8..]
-        .chunks_exact(8)
-        .filter_map(|x| x.try_into().ok())
-        .collect();
+    let mut regs: Vec<[u8; 8]> = wrapped[8..].as_chunks::<8>().0.to_vec();
     for j in (0..6).rev() {
         for i in (1..=n).rev() {
             let masked = xor_counter(&a, n * j + i)?;
@@ -73,10 +70,7 @@ pub fn aes_wrap(kek: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     let aes = cipher(kek)?;
     let n = key.len() / 8;
     let mut a = WRAP_IV;
-    let mut regs: Vec<[u8; 8]> = key
-        .chunks_exact(8)
-        .filter_map(|x| x.try_into().ok())
-        .collect();
+    let mut regs: Vec<[u8; 8]> = key.as_chunks::<8>().0.to_vec();
     for j in 0..6 {
         for i in 1..=n {
             let mut blk = to_block(&wrap_step(a, regs[i - 1]))?;
@@ -124,7 +118,7 @@ pub fn cbc_encrypt(key: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     let aes = cipher(key)?;
     let mut out = pkcs7_pad(data);
     let mut prev = [0u8; 16];
-    for chunk in out.chunks_exact_mut(16) {
+    for chunk in out.as_chunks_mut::<16>().0 {
         for (b, p) in chunk.iter_mut().zip(prev) {
             *b ^= p;
         }
@@ -176,8 +170,8 @@ pub fn cbc_decrypt_stream(
         if !buf.len().is_multiple_of(16) {
             bail!("encrypted data length is not a multiple of the AES block size");
         }
-        for chunk in buf.chunks_exact_mut(16) {
-            let ciphertext: [u8; 16] = chunk.try_into()?;
+        for chunk in buf.as_chunks_mut::<16>().0 {
+            let ciphertext: [u8; 16] = *chunk;
             let mut blk = to_block(chunk)?;
             aes.decrypt_block(&mut blk);
             for (o, p) in blk.iter_mut().zip(prev) {

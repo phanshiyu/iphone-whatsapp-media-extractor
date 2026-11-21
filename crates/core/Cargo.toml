@@ -1,0 +1,27 @@
+[package]
+name = "iwme-core"
+description = "Extract WhatsApp media from an iPhone backup into per-chat folders (library)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+aes.workspace = true
+anyhow.workspace = true
+jiff.workspace = true
+libc.workspace = true
+pbkdf2.workspace = true
+plist.workspace = true
+rusqlite.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -3,8 +3,10 @@
 pub mod backup;
 pub mod crypto;
 pub mod device;
+pub mod error;
 pub mod keybag;
 pub mod output;
+pub mod tools;
 pub mod whatsapp;
 
 use anyhow::{Context, Result, bail};
@@ -13,7 +15,69 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use whatsapp::MediaRecord;
+
+pub use error::{Cancelled, FullDiskAccessRequired};
+
+/// A cloneable flag used to cancel long-running work from another thread.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    /// A fresh, not-yet-cancelled token.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request cancellation.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether cancellation was requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// Fail with [`Cancelled`] if cancellation was requested.
+    pub fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            Err(Cancelled.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A progress notification.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Progress {
+    /// The device backup is running; `line` is the latest tool output.
+    BackingUp {
+        /// Percentage parsed from the output, if any.
+        percent: Option<f32>,
+        /// The raw output line.
+        line: String,
+    },
+    /// Reading the backup's file index and WhatsApp database.
+    Opening,
+    /// Copying media files: `done` of `total` handled so far.
+    Extracting {
+        /// Files handled so far.
+        done: usize,
+        /// Files to handle.
+        total: usize,
+    },
+    /// Something went wrong that did not stop the run.
+    Warning(String),
+}
+
+/// Receives [`Progress`] notifications.
+pub type ProgressFn<'a> = &'a dyn Fn(Progress);
 
 /// WhatsApp (consumer) shared app-group domain.
 pub const DOMAIN: &str = "AppDomainGroup-group.net.whatsapp.WhatsApp.shared";
@@ -87,7 +151,10 @@ fn resolve<'a>(files: &'a HashMap<String, FileEntry>, media_path: &str) -> Optio
 }
 
 /// Run the extraction.
-pub fn run(opts: &Options) -> Result<Summary> {
+#[expect(clippy::too_many_lines, reason = "one linear extraction pipeline")]
+pub fn run(opts: &Options, cancel: &CancelToken, progress: ProgressFn<'_>) -> Result<Summary> {
+    cancel.check()?;
+    progress(Progress::Opening);
     let backup = Backup::open(&opts.backup_dir, opts.password.as_deref())?;
     let domain = if opts.business {
         BUSINESS_DOMAIN
@@ -128,7 +195,7 @@ pub fn run(opts: &Options) -> Result<Summary> {
         })
         .collect();
 
-    let exif = if opts.exif && !exiftool_ready() {
+    let exif = if opts.exif && !exiftool_ready(progress) {
         false
     } else {
         opts.exif
@@ -137,6 +204,8 @@ pub fn run(opts: &Options) -> Result<Summary> {
     let total = planned.len();
     let mut chat_dirs: HashSet<String> = HashSet::new();
     for (n, p) in planned.iter().enumerate() {
+        cancel.check()?;
+        progress(Progress::Extracting { done: n, total });
         let Some(rec) = records.get(p.record) else {
             continue;
         };
@@ -164,7 +233,7 @@ pub fn run(opts: &Options) -> Result<Summary> {
                 .map_err(anyhow::Error::from)
                 .and_then(|()| backup.copy_file_to(entry, &dest));
             if let Err(e) = res {
-                eprintln!("warning: {}: {e:#}", p.name);
+                progress(Progress::Warning(format!("{}: {e:#}", p.name)));
                 summary.failed += 1;
                 continue;
             }
@@ -173,10 +242,13 @@ pub fn run(opts: &Options) -> Result<Summary> {
                 let _ = output::write_exif_dates(&dest, ext, p.unix, opts.utc);
             }
         }
-        if !opts.dry_run {
-            if let Err(e) = output::set_file_times(&dest, p.unix) {
-                eprintln!("warning: cannot set times on {}: {e}", dest.display());
-            }
+        if !opts.dry_run
+            && let Err(e) = output::set_file_times(&dest, p.unix)
+        {
+            progress(Progress::Warning(format!(
+                "cannot set times on {}: {e}",
+                dest.display()
+            )));
         }
         if up_to_date {
             summary.up_to_date += 1;
@@ -184,20 +256,18 @@ pub fn run(opts: &Options) -> Result<Summary> {
             summary.extracted += 1;
         }
         chat_dirs.insert(p.dir.clone());
-        if (n + 1) % 200 == 0 {
-            eprintln!("  {}/{total}", n + 1);
-        }
     }
+    progress(Progress::Extracting { done: total, total });
     summary.chats = chat_dirs.len();
     Ok(summary)
 }
 
-fn exiftool_ready() -> bool {
+fn exiftool_ready(progress: ProgressFn<'_>) -> bool {
     let ok = output::exiftool_available();
     if !ok {
-        eprintln!(
-            "warning: --exif requested but `exiftool` was not found on PATH; skipping EXIF tags"
-        );
+        progress(Progress::Warning(
+            "exiftool was not found; skipping EXIF tags".to_owned(),
+        ));
     }
     ok
 }

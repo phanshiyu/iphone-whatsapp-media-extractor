@@ -4,8 +4,8 @@
     reason = "test helpers; clippy.toml only exempts #[test] functions"
 )]
 
-use iphone_whatsapp_media_extractor::crypto::{aes_wrap, cbc_encrypt};
-use iphone_whatsapp_media_extractor::{DOMAIN, Options, Summary, run};
+use iwme_core::crypto::{aes_wrap, cbc_encrypt};
+use iwme_core::{CancelToken, DOMAIN, Options, Summary};
 use plist::{Dictionary, Uid, Value};
 use rusqlite::{Connection, params};
 use sha1::{Digest, Sha1};
@@ -322,6 +322,10 @@ fn build_backup(root: &Path, enc: Option<&Enc>, wal: bool) {
     b.store("Message/Media/222-333@g.us/c/d/g2.jpg", b"group-2");
     b.store("Message/Media/status@broadcast/e/f/s1.jpg", b"status");
     b.finish();
+}
+
+fn run(opts: &Options) -> anyhow::Result<Summary> {
+    iwme_core::run(opts, &CancelToken::new(), &|_| {})
 }
 
 fn options(backup: &Path, out: &Path, password: Option<&str>) -> Options {

@@ -1,0 +1,26 @@
+[package]
+name = "iwme-app"
+description = "Simple desktop app to extract WhatsApp media from an iPhone backup"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["gui"]
+
+[dependencies]
+anyhow.workspace = true
+eframe = { version = "0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "wayland", "x11"] }
+egui_extras = { version = "0.37.0", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+iwme-core.workspace = true
+jiff.workspace = true
+egui = "0.37.0"
+rfd = "0.18.0"
+
+[lints]
+workspace = true

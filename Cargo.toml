@@ -1,21 +1,26 @@
-[package]
-name = "iphone-whatsapp-media-extractor"
-version = "0.1.0"
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/cli", "crates/app"]
+
+[workspace.package]
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.87"
-description = "Extract WhatsApp media from an iPhone backup into per-chat folders with correct dates"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/phanshiyu/iphone-whatsapp-media-extractor"
+homepage = "https://github.com/phanshiyu/iphone-whatsapp-media-extractor"
 readme = "README.md"
 keywords = ["whatsapp", "iphone", "backup", "media", "ios"]
 categories = ["command-line-utilities"]
 
-[dependencies]
+[workspace.dependencies]
+iwme-core = { path = "crates/core", version = "0.2.0" }
+
 aes = "0.9.4"
 anyhow = "1.0.104"
-jiff = "1.0.1"
 clap = { version = "4.6.9", features = ["derive", "env"] }
 ctrlc = { version = "3.5.3", features = ["termination"] }
+jiff = "1.0.1"
 libc = "0.2.191"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }
 plist = "1.10.4"
@@ -25,7 +30,7 @@ sha1 = "0.11.0"
 sha2 = "0.11.1"
 tempfile = "3.27.0"
 
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"
 rust_2018_idioms = { level = "deny", priority = -1 }
 unused_qualifications = "warn"
@@ -34,7 +39,7 @@ unreachable_pub = "warn"
 missing_debug_implementations = "warn"
 missing_docs = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }

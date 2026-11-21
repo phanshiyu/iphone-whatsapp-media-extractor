@@ -1,66 +1,49 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="A goofy cartoon phone spilling photos into folders" width="200">
+  <img src="assets/logo.png" alt="A goofy cartoon phone spilling photos into folders" width="160">
 </p>
 
-<h1 align="center">iphone-whatsapp-media-extractor</h1>
+<h1 align="center">iPhone WhatsApp Media Extractor</h1>
 
-Pull the photos, videos, voice notes and documents out of WhatsApp on an iPhone, one folder per chat, with file dates set to when each message was sent and filenames that sort chronologically.
-
-That is all it does. No chat export, no HTML viewer: other tools do that well.
+Pull the photos, videos, voice notes and documents out of WhatsApp on an iPhone, one folder per chat, with file dates set to when each message was sent. A small Mac app, plus a command-line tool.
 
 ## Install
 
-### Download (macOS)
-
-Grab the latest `iphone-whatsapp-media-extractor-<version>-macos-universal.tar.gz` (works on Apple Silicon and Intel) from the [Releases page](https://github.com/phanshiyu/iphone-whatsapp-media-extractor/releases/latest), then:
-
 ```sh
-tar xzf iphone-whatsapp-media-extractor-*-macos-universal.tar.gz
-cd iphone-whatsapp-media-extractor-*-macos-universal
-xattr -c iphone-whatsapp-media-extractor  # clear quarantine: the binary is unsigned
-sudo mv iphone-whatsapp-media-extractor /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/phanshiyu/iphone-whatsapp-media-extractor/main/install.sh | sh
 ```
 
-### From source
+## Update
+
+Same command again. It replaces the existing install and prints `Updated to vX`.
 
 ```sh
-cargo install --git https://github.com/phanshiyu/iphone-whatsapp-media-extractor
+curl -fsSL https://raw.githubusercontent.com/phanshiyu/iphone-whatsapp-media-extractor/main/install.sh | sh
 ```
 
-For the plug-in-the-phone mode you also need libimobiledevice (`idevicebackup2` and `idevice_id`):
+## Uninstall
 
 ```sh
-brew install libimobiledevice          # macOS
-sudo apt install libimobiledevice-utils # Debian / Ubuntu
+curl -fsSL https://raw.githubusercontent.com/phanshiyu/iphone-whatsapp-media-extractor/main/install.sh | sh -s -- --uninstall
 ```
 
-## Usage
+The installer puts the app in `/Applications` (or `~/Applications`), the `iphone-whatsapp-media-extractor` command in `/usr/local/bin` (or `~/.local/bin`), and installs `libimobiledevice` with Homebrew if it is missing. Flags: `--no-deps`, `--cli-only`, `--uninstall`. No sudo needed.
 
-### Plug in the iPhone and run
+## Using the app
 
-```sh
-iphone-whatsapp-media-extractor ~/WhatsAppMedia
-```
+1. Open **iPhone WhatsApp Media Extractor** from Applications or Launchpad.
+2. Pick a source: **Back up my connected iPhone** (plug it in, unlock it, tap "Trust"), or **Use an existing backup** from Finder.
+3. Choose where to **Save to** (default `~/Desktop/WhatsApp Media`) and enter the backup password if asked.
+4. Click **Extract**. Progress is shown; you can cancel any time.
+5. Click **Show in Finder** when it is done.
 
-The tool backs up the connected iPhone to a temporary folder, extracts the WhatsApp media, then deletes the backup (also on error and Ctrl-C). Unlock the phone and tap "Trust" or enter the passcode if asked. The **whole device** is backed up, so you need free disk space roughly equal to the used storage on the phone. Use `--work-dir <DIR>` to put the temporary backup on a bigger disk.
-
-To keep the backup so later runs are incremental (much faster), use `--keep-backup <DIR>`. If several phones are connected, pick one with `--udid`.
-
-### From an existing backup
+## Command line
 
 ```sh
+iphone-whatsapp-media-extractor ~/WhatsAppMedia                  # back up the connected iPhone, extract, delete the backup
 iphone-whatsapp-media-extractor ~/WhatsAppMedia --backup "$HOME/Library/Application Support/MobileSync/Backup/<UDID>"
 ```
 
-`--backup` accepts the `<UDID>` folder itself, or the parent `Backup` folder if it holds exactly one backup (otherwise the backups are listed so you can choose).
-
-On macOS, Finder/iTunes backups live in `~/Library/Application Support/MobileSync/Backup/<UDID>`. Reading that folder needs Full Disk Access for your terminal (System Settings > Privacy & Security > Full Disk Access; quit and reopen the terminal afterwards). If access is denied and stderr is a terminal, the tool opens that settings pane for you. Device mode (running without `--backup`) does not need Full Disk Access, because it writes its own backup to a temp folder.
-
-Encrypted backups work: you are prompted for the password, or pass `--password` / set `IWME_PASSWORD`. The backup is only ever read.
-
-WhatsApp's own end-to-end encrypted chat backup is irrelevant here; this reads the iPhone's device backup, not WhatsApp's backup.
-
-### Options
+Device mode backs up the **whole phone** to a temporary folder (free space roughly equal to the phone's used storage; `--work-dir` picks another disk) and deletes it afterwards, also on error and Ctrl-C. `--keep-backup <DIR>` keeps it so later runs are incremental. `--backup` accepts the `<UDID>` folder, or the parent folder if it holds exactly one backup. Encrypted backups: you are prompted, or use `--password` / `IWME_PASSWORD`.
 
 | Flag | Meaning |
 | --- | --- |
@@ -75,27 +58,37 @@ WhatsApp's own end-to-end encrypted chat backup is irrelevant here; this reads t
 | `--dry-run` | Show what would be done without writing |
 | `--exif` | If `exiftool` is installed, also write date tags (jpg, jpeg, heic, png, mp4, mov) |
 
+From source: `cargo install --git https://github.com/phanshiyu/iphone-whatsapp-media-extractor iphone-whatsapp-media-extractor`
+
+## Notes
+
+- **Full Disk Access** is only needed to read existing Finder backups (`~/Library/Application Support/MobileSync/Backup`). The app shows a banner with an "Open Settings" button: enable it for the app, then reopen it. For the CLI, enable it for your terminal. Backing up a connected iPhone does not need it.
+- **Device mode needs libimobiledevice** (`brew install libimobiledevice`); the installer sets it up. Existing-backup mode works without it.
+- **The app is not notarized** (ad-hoc signed). Installed with the command above it simply opens. If you download the `.dmg` or `.zip` from the Releases page by hand, macOS may block it: open System Settings > Privacy & Security and click **Open Anyway**.
+- WhatsApp's own end-to-end encrypted chat backup is irrelevant: this reads the iPhone's device backup.
+
 ## Output
 
 ```
 <OUTPUT_DIR>/<Chat Name>/YYYY-MM-DD_HH-MM-SS_NNN[_<sender>].<ext>
 ```
 
-- Chat name is the contact or group name (falling back to the phone number), cleaned for all filesystems. Two chats that end up with the same name get ` (<number>)` appended.
-- `NNN` numbers messages sent in the same second so sorting by name equals chronological order.
-- In groups the sender is appended (`Me` for your own messages).
-- The file's modified time (and creation time on macOS) is set to the message time.
-- Re-running is safe: files that already exist with the same size are skipped, and their timestamps are repaired. (With `--exif`, exiftool changes file sizes, so those files are copied again on re-runs.)
-
-A summary of chats, files extracted, files missing from the backup (referenced by WhatsApp but not present) and skipped files is printed at the end.
+- Chat name is the contact or group name (falling back to the phone number), cleaned for all filesystems. Chats with the same name get ` (<number>)` appended.
+- `NNN` numbers messages sent in the same second so sorting by name is chronological. In groups the sender is appended (`Me` for your own messages).
+- File modified (and, on macOS, creation) times are set to the message time.
+- Re-running is safe: files already present with the same size are skipped and their timestamps repaired. (With EXIF writing, exiftool changes sizes, so those files are copied again.)
 
 ## Development
 
+Cargo workspace: `crates/core` (`iwme-core`, library), `crates/cli` (command line), `crates/app` (`iwme-app`, egui GUI).
+
 ```sh
-cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test
+cargo fmt --all --check && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo test --workspace
+cargo run -p iwme-app                                    # the GUI
+scripts/bundle-macos.sh <binary> <version> <out-dir>     # build the .app
 ```
 
-The tests build synthetic encrypted and unencrypted backups; no real phone data is needed.
+Tests build synthetic backups; no real phone data is needed. Releases are built by tagging `v*`.
 
 ## License
 

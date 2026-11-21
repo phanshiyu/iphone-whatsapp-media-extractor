@@ -30,7 +30,7 @@ pub struct PlannedFile {
     clippy::cast_possible_truncation,
     reason = "timestamps are far inside i64 range"
 )]
-pub fn apple_to_unix(apple: f64) -> i64 {
+pub const fn apple_to_unix(apple: f64) -> i64 {
     apple.floor() as i64 + APPLE_EPOCH_OFFSET
 }
 
@@ -231,18 +231,23 @@ fn set_birth_time(path: &Path, unix: i64) -> io::Result<()> {
 /// Whether `exiftool` can be run.
 #[must_use]
 pub fn exiftool_available() -> bool {
-    Command::new("exiftool")
-        .arg("-ver")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    crate::tools::find_tool("exiftool").is_some_and(|p| {
+        Command::new(p)
+            .arg("-ver")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
 }
 
 /// Best-effort: write date tags with exiftool. Returns whether it ran successfully.
 #[must_use]
 pub fn write_exif_dates(path: &Path, ext: &str, unix: i64, utc: bool) -> bool {
-    let mut cmd = Command::new("exiftool");
+    let Some(exiftool) = crate::tools::find_tool("exiftool") else {
+        return false;
+    };
+    let mut cmd = Command::new(exiftool);
     cmd.args(["-q", "-overwrite_original"]);
     match ext {
         "jpg" | "jpeg" | "heic" | "png" => {

@@ -2,10 +2,14 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use iphone_whatsapp_media_extractor::backup::Backup;
-use iphone_whatsapp_media_extractor::device::{self, BackupSource, DeviceOptions};
-use iphone_whatsapp_media_extractor::{Options, run};
+use iwme_core::backup::Backup;
+use iwme_core::device::{self, BackupSource, DeviceOptions};
+use iwme_core::error::{self, FullDiskAccessRequired};
+use iwme_core::{CancelToken, Options, Progress, run};
+use std::cell::Cell;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 /// Extract WhatsApp media from an iPhone into one folder per chat.
 ///
@@ -72,8 +76,44 @@ fn password_for_device(cli: &Cli, opts: &DeviceOptions, udid: &str) -> Result<Op
     Ok(password)
 }
 
-fn main() -> Result<()> {
+/// Print progress to stderr: progress bars redraw in place, everything else
+/// gets its own line, and extraction progress is reported every 200 files.
+fn print_progress(redraw_pending: &Cell<bool>, p: &Progress) {
+    let mut err = std::io::stderr().lock();
+    let end_redraw = |err: &mut std::io::StderrLock<'_>| {
+        if redraw_pending.replace(false) {
+            let _ = writeln!(err);
+        }
+    };
+    match p {
+        Progress::BackingUp {
+            percent: Some(_),
+            line,
+        } => {
+            let _ = write!(err, "\r{line}");
+            let _ = err.flush();
+            redraw_pending.set(true);
+        }
+        Progress::BackingUp { line, .. } => {
+            end_redraw(&mut err);
+            let _ = writeln!(err, "{line}");
+        }
+        Progress::Extracting { done, total } if *done > 0 && done % 200 == 0 => {
+            end_redraw(&mut err);
+            let _ = writeln!(err, "  {done}/{total}");
+        }
+        Progress::Warning(w) => {
+            end_redraw(&mut err);
+            let _ = writeln!(err, "warning: {w}");
+        }
+        Progress::Extracting { .. } | Progress::Opening => {}
+    }
+}
+
+fn real_main(cancel: &CancelToken) -> Result<()> {
     let cli = Cli::parse();
+    let pending = Cell::new(false);
+    let progress = |p: Progress| print_progress(&pending, &p);
     let (source, mut password) = if let Some(path) = &cli.backup {
         (
             BackupSource::existing(device::find_backup(path)?),
@@ -87,21 +127,58 @@ fn main() -> Result<()> {
         };
         let udid = device::pick_device(&opts)?;
         let password = password_for_device(&cli, &opts, &udid)?;
-        (device::take_backup(&opts, &udid)?, password)
+        eprintln!(
+            "Backing up device {udid}.\n\
+             Unlock the iPhone and tap \"Trust\" / enter its passcode if prompted. The whole device \
+             is backed up, which needs free disk space roughly equal to the used storage on the phone."
+        );
+        (
+            device::take_backup(&opts, &udid, cancel, &progress)?,
+            password,
+        )
     };
     if password.is_none() && Backup::is_encrypted(&source.path)? {
         password = Some(prompt_password()?);
     }
-    let summary = run(&Options {
-        backup_dir: source.path,
-        output_dir: cli.output_dir,
-        password,
-        business: cli.business,
-        include_status: cli.include_status,
-        utc: cli.utc,
-        dry_run: cli.dry_run,
-        exif: cli.exif,
-    })?;
+    let summary = run(
+        &Options {
+            backup_dir: source.path,
+            output_dir: cli.output_dir,
+            password,
+            business: cli.business,
+            include_status: cli.include_status,
+            utc: cli.utc,
+            dry_run: cli.dry_run,
+            exif: cli.exif,
+        },
+        cancel,
+        &progress,
+    )?;
     println!("{summary}{}", if cli.dry_run { " (dry run)" } else { "" });
     Ok(())
+}
+
+fn main() -> ExitCode {
+    let cancel = CancelToken::new();
+    let handler_token = cancel.clone();
+    if let Err(e) = ctrlc::set_handler(move || handler_token.cancel()) {
+        eprintln!("warning: cannot install Ctrl-C handler: {e}");
+    }
+    match real_main(&cancel) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) if error::is_cancelled(&err) => {
+            eprintln!("\ninterrupted");
+            ExitCode::from(130)
+        }
+        Err(err) => {
+            eprintln!("Error: {err:?}");
+            if err.downcast_ref::<FullDiskAccessRequired>().is_some()
+                && std::io::stderr().is_terminal()
+                && error::open_full_disk_access_settings()
+            {
+                eprintln!("I opened the Full Disk Access settings pane for you.");
+            }
+            ExitCode::FAILURE
+        }
+    }
 }
