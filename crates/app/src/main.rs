@@ -7,13 +7,17 @@ pub mod worker;
 use eframe::egui;
 use iwme_core::device::{self, BackupInfo};
 use iwme_core::error::{self, is_cancelled};
+use iwme_core::output::format_time;
 use iwme_core::tools::{find_tool, home_dir};
-use iwme_core::{CancelToken, Options, Progress, Summary};
+use iwme_core::{CancelToken, Dedupe, Options, Progress, Summary};
 use logic::{SourceMode, StartInputs};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use worker::{DeviceEntry, Job, Msg, Source};
+use std::time::{Duration, Instant};
+use worker::{DeviceEntry, Job, Msg, Session, Source};
 
 const TITLE: &str = "iPhone WhatsApp Media Extractor";
 const BREW_CMD: &str = "brew install libimobiledevice";
@@ -39,6 +43,10 @@ struct App {
     utc: bool,
     exif: bool,
     exiftool_ok: bool,
+    dedupe: Dedupe,
+    session: Option<Session>,
+    checked: HashSet<String>,
+    filter: String,
     running: bool,
     cancel: CancelToken,
     phase: String,
@@ -74,6 +82,10 @@ impl App {
             utc: false,
             exif: false,
             exiftool_ok: find_tool("exiftool").is_some(),
+            dedupe: Dedupe::Off,
+            session: None,
+            checked: HashSet::new(),
+            filter: String::new(),
             running: false,
             cancel: CancelToken::new(),
             phase: String::new(),
@@ -149,23 +161,41 @@ impl App {
                         }
                     }
                 }
+                Msg::Loaded(r) => {
+                    self.running = false;
+                    match r {
+                        Ok(session) => {
+                            self.checked = session.chats.iter().map(|c| c.key.clone()).collect();
+                            self.filter.clear();
+                            self.session = Some(session);
+                        }
+                        Err(e) => self.fail(&e),
+                    }
+                }
                 Msg::Done(r) => {
                     self.running = false;
                     match r {
                         Ok(s) => {
                             self.summary = Some(s);
                             self.output_done = Some(PathBuf::from(&self.output));
+                            // The temporary device backup is no longer needed.
+                            if self.mode == SourceMode::Device {
+                                self.session = None;
+                            }
                         }
-                        Err(e) if is_cancelled(&e) => {
-                            self.error = Some("Cancelled.".to_owned());
-                        }
-                        Err(e) => {
-                            self.fda_needed = logic::is_full_disk_access(&e);
-                            self.error = Some(logic::friendly_error(&e));
-                        }
+                        Err(e) => self.fail(&e),
                     }
                 }
             }
+        }
+    }
+
+    fn fail(&mut self, e: &anyhow::Error) {
+        if is_cancelled(e) {
+            self.error = Some("Cancelled.".to_owned());
+        } else {
+            self.fda_needed = logic::is_full_disk_access(e);
+            self.error = Some(logic::friendly_error(e));
         }
     }
 
@@ -190,14 +220,40 @@ impl App {
             mode: self.mode,
             device_selected: self.selected_device < self.devices.len(),
             backup_selected: self.selected_backup.is_some_and(|i| i < self.backups.len()),
-            output_set: !self.output.trim().is_empty(),
             needs_password: self.needs_password(),
             password_set: !self.password.is_empty(),
             running: self.running,
         }
     }
 
-    fn start(&mut self, ctx: &egui::Context) {
+    fn reset_run(&mut self, phase: &str) {
+        self.cancel = CancelToken::new();
+        self.running = true;
+        self.error = None;
+        self.summary = None;
+        self.fda_needed = false;
+        self.log.clear();
+        self.fraction = None;
+        phase.clone_into(&mut self.phase);
+    }
+
+    fn options(&self) -> Options {
+        Options {
+            backup_dir: PathBuf::new(),
+            output_dir: PathBuf::from(self.output.trim()),
+            password: self.needs_password().then(|| self.password.clone()),
+            business: self.business,
+            include_status: self.include_status,
+            utc: self.utc,
+            dry_run: false,
+            exif: self.exif && self.exiftool_ok,
+            dedupe: self.dedupe,
+            chats: None,
+        }
+    }
+
+    /// Step 1: back up the device if needed, open the backup, list the chats.
+    fn load_chats(&mut self, ctx: &egui::Context) {
         let source = match self.mode {
             SourceMode::Device => self
                 .devices
@@ -209,26 +265,26 @@ impl App {
                 .map(|b| Source::Existing(b.path.clone())),
         };
         let Some(source) = source else { return };
-        let options = Options {
-            backup_dir: PathBuf::new(),
-            output_dir: PathBuf::from(self.output.trim()),
-            password: self.needs_password().then(|| self.password.clone()),
-            business: self.business,
-            include_status: self.include_status,
-            utc: self.utc,
-            dry_run: false,
-            exif: self.exif && self.exiftool_ok,
+        let job = Job {
+            source,
+            options: self.options(),
         };
-        self.cancel = CancelToken::new();
-        self.running = true;
-        self.error = None;
-        self.summary = None;
-        self.fda_needed = false;
-        self.log.clear();
-        self.fraction = None;
-        "Starting…".clone_into(&mut self.phase);
-        worker::start(
-            Job { source, options },
+        self.reset_run("Starting…");
+        worker::load(job, self.cancel.clone(), self.tx.clone(), ctx.clone());
+    }
+
+    /// Step 2: extract the checked chats.
+    fn extract(&mut self, ctx: &egui::Context) {
+        let Some(session) = &self.session else { return };
+        let extractor = Arc::clone(&session.extractor);
+        let options = Options {
+            chats: Some(self.checked.clone()),
+            ..self.options()
+        };
+        self.reset_run("Starting…");
+        worker::extract(
+            extractor,
+            options,
             self.cancel.clone(),
             self.tx.clone(),
             ctx.clone(),
@@ -361,6 +417,17 @@ impl App {
         });
     }
 
+    fn password_section(&mut self, ui: &mut egui::Ui) {
+        if self.needs_password() {
+            ui.label(egui::RichText::new("Backup password").strong());
+            ui.add(
+                egui::TextEdit::singleline(&mut self.password)
+                    .password(true)
+                    .desired_width(300.0),
+            );
+        }
+    }
+
     fn options_section(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Save to").strong());
         ui.horizontal(|ui| {
@@ -371,24 +438,93 @@ impl App {
                 self.output = dir.display().to_string();
             }
         });
-        if self.needs_password() {
-            ui.label(egui::RichText::new("Backup password").strong());
-            ui.add(
-                egui::TextEdit::singleline(&mut self.password)
-                    .password(true)
-                    .desired_width(300.0),
-            );
-        }
         ui.collapsing("More options", |ui| {
-            ui.checkbox(&mut self.business, "WhatsApp Business");
-            ui.checkbox(&mut self.include_status, "Include status updates");
+            ui.add_enabled_ui(self.session.is_none(), |ui| {
+                ui.checkbox(&mut self.business, "WhatsApp Business");
+                ui.checkbox(&mut self.include_status, "Include status updates");
+            });
             ui.checkbox(&mut self.utc, "Use UTC in file names");
+            ui.horizontal(|ui| {
+                ui.label("Duplicates:");
+                egui::ComboBox::from_id_salt("dedupe")
+                    .selected_text(logic::dedupe_label(self.dedupe))
+                    .show_ui(ui, |ui| {
+                        for d in [Dedupe::Off, Dedupe::PerChat, Dedupe::AllChats] {
+                            ui.selectable_value(&mut self.dedupe, d, logic::dedupe_label(d));
+                        }
+                    });
+            });
             ui.add_enabled(
                 self.exiftool_ok,
                 egui::Checkbox::new(&mut self.exif, "Write EXIF dates"),
             )
             .on_disabled_hover_text("Needs exiftool: brew install exiftool");
         });
+    }
+
+    fn chats_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(session) = &self.session else { return };
+        let mut change_source = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Chats").strong());
+            ui.label(format!(
+                "{} of {} selected",
+                self.checked.len(),
+                session.chats.len()
+            ));
+            change_source = ui.button("Change source").clicked();
+        });
+        let visible = logic::filter_chats(&session.chats, &self.filter);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text("Search")
+                    .desired_width(160.0),
+            );
+            if ui.button("Select all").clicked() {
+                self.checked.extend(visible.iter().map(|c| c.key.clone()));
+            }
+            if ui.button("Select none").clicked() {
+                for c in &visible {
+                    self.checked.remove(&c.key);
+                }
+            }
+        });
+        let row = ui.spacing().interact_size.y;
+        egui::ScrollArea::vertical()
+            .id_salt("chats")
+            .max_height(260.0)
+            .auto_shrink([false, true])
+            .show_rows(ui, row, visible.len(), |ui, range| {
+                for c in visible.get(range).unwrap_or_default() {
+                    ui.horizontal(|ui| {
+                        let mut on = self.checked.contains(&c.key);
+                        if ui.checkbox(&mut on, &c.name).changed() {
+                            if on {
+                                self.checked.insert(c.key.clone());
+                            } else {
+                                self.checked.remove(&c.key);
+                            }
+                        }
+                        let kind = if c.is_group { "group \u{b7} " } else { "" };
+                        ui.weak(format!(
+                            "{kind}{} media \u{b7} {}",
+                            c.media_count,
+                            format_time(c.last, false, "%Y-%m-%d")
+                        ));
+                    });
+                }
+            });
+        let ready = !self.output.trim().is_empty() && !self.checked.is_empty();
+        let go = egui::Button::new(egui::RichText::new("Extract").size(18.0))
+            .min_size(egui::vec2(ui.available_width(), 40.0));
+        if ui.add_enabled(ready, go).clicked() {
+            let ctx = ui.ctx().clone();
+            self.extract(&ctx);
+        }
+        if change_source {
+            self.session = None;
+        }
     }
 
     fn run_section(&mut self, ui: &mut egui::Ui) {
@@ -403,15 +539,14 @@ impl App {
                 self.cancel.cancel();
                 "Cancelling…".clone_into(&mut self.phase);
             }
+        } else if self.session.is_some() {
+            self.chats_ui(ui);
         } else {
-            let go = egui::Button::new(egui::RichText::new("Extract").size(18.0))
+            let go = egui::Button::new(egui::RichText::new("Load chats").size(18.0))
                 .min_size(egui::vec2(ui.available_width(), 40.0));
-            if ui
-                .add_enabled(self.start_inputs().can_start(), go)
-                .clicked()
-            {
+            if ui.add_enabled(self.start_inputs().can_load(), go).clicked() {
                 let ctx = ui.ctx().clone();
-                self.start(&ctx);
+                self.load_chats(&ctx);
             }
         }
         if !self.log.is_empty() {
@@ -454,7 +589,11 @@ impl eframe::App for App {
                 Self::header(ui);
                 ui.add_space(8.0);
                 ui.add_enabled_ui(!self.running, |ui| {
-                    self.source_section(ui);
+                    ui.add_enabled_ui(self.session.is_none(), |ui| {
+                        self.source_section(ui);
+                        ui.add_space(8.0);
+                        self.password_section(ui);
+                    });
                     ui.add_space(8.0);
                     self.options_section(ui);
                 });
@@ -462,6 +601,20 @@ impl eframe::App for App {
                 self.run_section(ui);
             });
         });
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Stop any running job and give it a moment to delete its temporary backup.
+        self.cancel.cancel();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.running && Instant::now() < deadline {
+            if let Ok(Msg::Loaded(_) | Msg::Done(_)) =
+                self.rx.recv_timeout(Duration::from_millis(100))
+            {
+                self.running = false;
+            }
+        }
+        self.session = None;
     }
 }
 

@@ -1,15 +1,39 @@
 //! Command-line entry point.
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use iwme_core::backup::Backup;
+use iwme_core::chats::{ChatInfo, resolve_patterns};
 use iwme_core::device::{self, BackupSource, DeviceOptions};
 use iwme_core::error::{self, FullDiskAccessRequired};
-use iwme_core::{CancelToken, Options, Progress, run};
+use iwme_core::output::format_time;
+use iwme_core::{CancelToken, Dedupe, Extractor, Options, Progress};
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// How to treat files with identical content.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DedupeArg {
+    /// Keep every file
+    Off,
+    /// Skip files identical to an earlier one in the same chat
+    PerChat,
+    /// Skip files identical to an earlier one in any chat
+    AllChats,
+}
+
+impl From<DedupeArg> for Dedupe {
+    fn from(d: DedupeArg) -> Self {
+        match d {
+            DedupeArg::Off => Self::Off,
+            DedupeArg::PerChat => Self::PerChat,
+            DedupeArg::AllChats => Self::AllChats,
+        }
+    }
+}
 
 /// Extract WhatsApp media from an iPhone into one folder per chat.
 ///
@@ -20,7 +44,8 @@ use std::process::ExitCode;
 #[expect(clippy::struct_excessive_bools, reason = "independent CLI flags")]
 struct Cli {
     /// Where to write the per-chat folders
-    output_dir: PathBuf,
+    #[arg(required_unless_present = "list_chats")]
+    output_dir: Option<PathBuf>,
     /// Use an existing backup (the UDID folder, or a folder holding one backup)
     #[arg(long, value_name = "BACKUP_DIR")]
     backup: Option<PathBuf>,
@@ -51,6 +76,53 @@ struct Cli {
     /// Also write date tags with exiftool, if installed
     #[arg(long)]
     exif: bool,
+    /// Skip files whose content is identical to an earlier one
+    #[arg(long, value_enum, default_value = "off")]
+    dedupe: DedupeArg,
+    /// List the chats that have media, then exit
+    #[arg(long)]
+    list_chats: bool,
+    /// Only extract this chat (JID or name; repeatable)
+    #[arg(long = "chat", value_name = "NAME_OR_JID")]
+    chat: Vec<String>,
+    /// Do not extract this chat (JID or name; repeatable)
+    #[arg(long = "exclude-chat", value_name = "NAME_OR_JID")]
+    exclude_chat: Vec<String>,
+}
+
+fn print_chats(chats: &[ChatInfo]) {
+    let width = chats
+        .iter()
+        .map(|c| c.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    for c in chats {
+        println!(
+            "{:<width$}  {:<6}  {:>6}  {}  {}",
+            c.name,
+            if c.is_group { "group" } else { "direct" },
+            c.media_count,
+            format_time(c.last, false, "%Y-%m-%d"),
+            c.key,
+        );
+    }
+}
+
+/// The chat keys to extract, or `None` for all.
+fn selection(cli: &Cli, chats: &[ChatInfo]) -> Result<Option<HashSet<String>>> {
+    if cli.chat.is_empty() && cli.exclude_chat.is_empty() {
+        return Ok(None);
+    }
+    let mut keys = if cli.chat.is_empty() {
+        chats.iter().map(|c| c.key.clone()).collect()
+    } else {
+        resolve_patterns(chats, &cli.chat)?
+    };
+    for k in resolve_patterns(chats, &cli.exclude_chat)? {
+        keys.remove(&k);
+    }
+    anyhow::ensure!(!keys.is_empty(), "no chats left to extract");
+    Ok(Some(keys))
 }
 
 fn prompt_password() -> Result<String> {
@@ -140,20 +212,26 @@ fn real_main(cancel: &CancelToken) -> Result<()> {
     if password.is_none() && Backup::is_encrypted(&source.path)? {
         password = Some(prompt_password()?);
     }
-    let summary = run(
-        &Options {
-            backup_dir: source.path,
-            output_dir: cli.output_dir,
-            password,
-            business: cli.business,
-            include_status: cli.include_status,
-            utc: cli.utc,
-            dry_run: cli.dry_run,
-            exif: cli.exif,
-        },
-        cancel,
-        &progress,
-    )?;
+    let mut opts = Options {
+        backup_dir: source.path,
+        output_dir: cli.output_dir.clone().unwrap_or_default(),
+        password,
+        business: cli.business,
+        include_status: cli.include_status,
+        utc: cli.utc,
+        dry_run: cli.dry_run,
+        exif: cli.exif,
+        dedupe: cli.dedupe.into(),
+        chats: None,
+    };
+    let extractor = Extractor::open(&opts, cancel, &progress)?;
+    let chats = extractor.list_chats(cli.include_status);
+    if cli.list_chats {
+        print_chats(&chats);
+        return Ok(());
+    }
+    opts.chats = selection(&cli, &chats)?;
+    let summary = extractor.run(&opts, cancel, &progress)?;
     println!("{summary}{}", if cli.dry_run { " (dry run)" } else { "" });
     Ok(())
 }

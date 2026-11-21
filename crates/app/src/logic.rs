@@ -1,6 +1,7 @@
 //! Pure, testable GUI state logic.
 
-use iwme_core::{FullDiskAccessRequired, Progress, Summary};
+use iwme_core::chats::ChatInfo;
+use iwme_core::{Dedupe, FullDiskAccessRequired, Progress, Summary};
 use std::path::{Path, PathBuf};
 
 /// Where the media comes from.
@@ -13,24 +14,23 @@ pub enum SourceMode {
     Existing,
 }
 
-/// Everything that decides whether "Extract" is enabled.
+/// Everything that decides whether "Load chats" is enabled.
 #[derive(Debug, Clone, Copy, Default)]
 #[expect(clippy::struct_excessive_bools, reason = "independent form facts")]
 pub struct StartInputs {
     pub mode: SourceMode,
     pub device_selected: bool,
     pub backup_selected: bool,
-    pub output_set: bool,
     pub needs_password: bool,
     pub password_set: bool,
     pub running: bool,
 }
 
 impl StartInputs {
-    /// Whether the extraction may start.
+    /// Whether loading the chats may start.
     #[must_use]
-    pub const fn can_start(self) -> bool {
-        if self.running || !self.output_set {
+    pub const fn can_load(self) -> bool {
+        if self.running {
             return false;
         }
         if self.needs_password && !self.password_set {
@@ -107,15 +107,36 @@ pub fn log_line(p: &Progress) -> Option<String> {
 
 /// Summary rows as (label, count).
 #[must_use]
-pub const fn summary_rows(s: &Summary) -> [(&'static str, usize); 6] {
+pub const fn summary_rows(s: &Summary) -> [(&'static str, usize); 7] {
     [
         ("Chats", s.chats),
         ("Extracted", s.extracted),
         ("Already present", s.up_to_date),
         ("Missing from backup", s.missing),
         ("Skipped (status)", s.skipped),
+        ("Duplicates skipped", s.duplicates),
         ("Failed", s.failed),
     ]
+}
+
+/// Label for a duplicate-handling choice.
+#[must_use]
+pub const fn dedupe_label(d: Dedupe) -> &'static str {
+    match d {
+        Dedupe::Off => "Keep all",
+        Dedupe::PerChat => "Skip within each chat",
+        Dedupe::AllChats => "Skip across all chats",
+    }
+}
+
+/// Chats whose name or JID contains `query` (case-insensitive).
+#[must_use]
+pub fn filter_chats<'a>(chats: &'a [ChatInfo], query: &str) -> Vec<&'a ChatInfo> {
+    let q = query.trim().to_lowercase();
+    chats
+        .iter()
+        .filter(|c| c.name.to_lowercase().contains(&q) || c.key.to_lowercase().contains(&q))
+        .collect()
 }
 
 /// A friendly one-paragraph message for an error.
@@ -146,7 +167,6 @@ mod tests {
             mode: SourceMode::Device,
             device_selected: true,
             backup_selected: false,
-            output_set: true,
             needs_password: false,
             password_set: false,
             running: false,
@@ -154,52 +174,45 @@ mod tests {
     }
 
     #[test]
-    fn can_start_rules() {
-        assert!(ready().can_start());
+    fn can_load_rules() {
+        assert!(ready().can_load());
         assert!(
             !StartInputs {
                 running: true,
                 ..ready()
             }
-            .can_start()
-        );
-        assert!(
-            !StartInputs {
-                output_set: false,
-                ..ready()
-            }
-            .can_start()
+            .can_load()
         );
         assert!(
             !StartInputs {
                 device_selected: false,
                 ..ready()
             }
-            .can_start()
+            .can_load()
         );
         let existing = StartInputs {
             mode: SourceMode::Existing,
             ..ready()
         };
-        assert!(!existing.can_start());
+        assert!(!existing.can_load());
         assert!(
             StartInputs {
                 backup_selected: true,
                 ..existing
             }
-            .can_start()
+            .can_load()
         );
         let pw = StartInputs {
             needs_password: true,
             ..ready()
         };
-        assert!(!pw.can_start());
+        assert!(!pw.can_load());
         assert!(
             StartInputs {
                 password_set: true,
                 ..pw
             }
-            .can_start()
+            .can_load()
         );
     }
 
@@ -237,6 +250,23 @@ mod tests {
             log_line(&Progress::Warning("w".into())).as_deref(),
             Some("warning: w")
         );
+    }
+
+    #[test]
+    fn chat_filter() {
+        let chat = |key: &str, name: &str| ChatInfo {
+            key: key.into(),
+            name: name.into(),
+            is_group: false,
+            media_count: 1,
+            first: 0,
+            last: 0,
+        };
+        let chats = [chat("1@s.whatsapp.net", "Alice"), chat("2@g.us", "Family")];
+        assert_eq!(filter_chats(&chats, "").len(), 2);
+        assert_eq!(filter_chats(&chats, " FAM ")[0].name, "Family");
+        assert_eq!(filter_chats(&chats, "1@s")[0].name, "Alice");
+        assert_eq!(filter_chats(&chats, "zzz").len(), 0);
     }
 
     #[test]

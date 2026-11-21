@@ -4,12 +4,14 @@
     reason = "test helpers; clippy.toml only exempts #[test] functions"
 )]
 
+use iwme_core::chats::ChatInfo;
 use iwme_core::crypto::{aes_wrap, cbc_encrypt};
-use iwme_core::{CancelToken, DOMAIN, Options, Summary};
+use iwme_core::{CancelToken, DOMAIN, Dedupe, Extractor, Options, Summary};
 use plist::{Dictionary, Uid, Value};
 use rusqlite::{Connection, params};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -415,7 +417,8 @@ fn check_summary(s: &Summary, extracted: usize, up_to_date: usize) {
             up_to_date,
             missing: 1,
             skipped: 1,
-            failed: 0
+            failed: 0,
+            duplicates: 0
         }
     );
 }
@@ -504,4 +507,156 @@ fn not_a_backup() {
     let out = tempfile::tempdir().unwrap();
     let err = run(&options(dir.path(), out.path(), None)).unwrap_err();
     assert!(format!("{err:#}").contains("Manifest.plist"), "{err:#}");
+}
+
+#[test]
+fn list_chats_contents() {
+    let backup = tempfile::tempdir().unwrap();
+    build_backup(backup.path(), None, false);
+    let opts = options(backup.path(), Path::new("unused"), None);
+    let ex = Extractor::open(&opts, &CancelToken::new(), &|_| {}).unwrap();
+    let chat = |key: &str, name: &str, is_group, media_count, first, last| ChatInfo {
+        key: key.into(),
+        name: name.into(),
+        is_group,
+        media_count,
+        first,
+        last,
+    };
+    // Most recent activity first; status excluded.
+    assert_eq!(
+        ex.list_chats(false),
+        [
+            chat("222-333@g.us", "Family", true, 2, T + 100, T + 100),
+            chat("111@s.whatsapp.net", "Alice", false, 4, T, T + 5),
+        ]
+    );
+    assert_eq!(ex.list_chats(true).len(), 3);
+}
+
+#[test]
+fn only_selected_chats_are_extracted() {
+    let backup = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    build_backup(backup.path(), None, false);
+    let opts = Options {
+        chats: Some(HashSet::from(["222-333@g.us".to_owned()])),
+        ..options(backup.path(), out.path(), None)
+    };
+    let ex = Extractor::open(&opts, &CancelToken::new(), &|_| {}).unwrap();
+    let s = ex.run(&opts, &CancelToken::new(), &|_| {}).unwrap();
+    assert_eq!((s.chats, s.extracted, s.missing), (1, 2, 0));
+    assert_eq!(listing(out.path()), ["Family"]);
+    // The same opened backup serves a second selection.
+    let opts = Options {
+        chats: Some(HashSet::from(["111@s.whatsapp.net".to_owned()])),
+        ..opts
+    };
+    let s = ex.run(&opts, &CancelToken::new(), &|_| {}).unwrap();
+    assert_eq!((s.chats, s.extracted, s.missing), (1, 3, 1));
+    assert_eq!(listing(out.path()), ["Alice", "Family"]);
+}
+
+/// Alice sends the same bytes twice (plus one other file); Bob sends them too.
+fn build_dup_backup(root: &Path) {
+    let b = Builder::new(root, None);
+    let db_path = root.join("chat.tmp");
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE ZWACHATSESSION (Z_PK INTEGER PRIMARY KEY, ZCONTACTJID TEXT, ZPARTNERNAME TEXT, ZGROUPINFO INTEGER);
+         CREATE TABLE ZWAGROUPMEMBER (Z_PK INTEGER PRIMARY KEY, ZMEMBERJID TEXT, ZCONTACTNAME TEXT);
+         CREATE TABLE ZWAMEDIAITEM (Z_PK INTEGER PRIMARY KEY, ZMEDIALOCALPATH TEXT, ZTITLE TEXT);
+         CREATE TABLE ZWAMESSAGE (Z_PK INTEGER PRIMARY KEY, ZCHATSESSION INTEGER, ZMESSAGEDATE REAL,
+            ZMEDIAITEM INTEGER, ZMESSAGETYPE INTEGER, ZISFROMME INTEGER, ZGROUPMEMBER INTEGER, ZPUSHNAME TEXT);
+         INSERT INTO ZWACHATSESSION VALUES (1, '111@s.whatsapp.net', 'Alice', NULL);
+         INSERT INTO ZWACHATSESSION VALUES (2, '222@s.whatsapp.net', 'Bob', NULL);",
+    )
+    .unwrap();
+    let files: [(i64, i64, &str, &[u8]); 4] = [
+        (1, 1, "x.jpg", b"same"),
+        (2, 1, "y.jpg", b"same"),
+        (3, 1, "z.jpg", b"other"),
+        (4, 2, "w.jpg", b"same"),
+    ];
+    for (pk, chat, name, content) in files {
+        let path = format!("Media/{chat}/{name}");
+        db.execute(
+            "INSERT INTO ZWAMEDIAITEM VALUES (?1, ?2, NULL)",
+            params![pk, path],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO ZWAMESSAGE VALUES (?1, ?2, ?3, ?1, 1, 0, NULL, NULL)",
+            params![pk, chat, f64::from(i32::try_from(T - APPLE + pk).unwrap())],
+        )
+        .unwrap();
+        b.store(&format!("Message/{path}"), content);
+    }
+    drop(db);
+    b.store("ChatStorage.sqlite", &fs::read(&db_path).unwrap());
+    b.finish();
+}
+
+fn files_under(dir: &Path) -> Vec<String> {
+    let mut v = Vec::new();
+    for chat in listing(dir) {
+        for f in listing(&dir.join(&chat)) {
+            v.push(format!("{chat}/{f}"));
+        }
+    }
+    v
+}
+
+#[test]
+fn dedupe_modes() {
+    let backup = tempfile::tempdir().unwrap();
+    build_dup_backup(backup.path());
+    // (mode, files kept, extracted, duplicates)
+    let cases: [(Dedupe, usize, usize, usize); 3] = [
+        (Dedupe::Off, 4, 4, 0),
+        (Dedupe::PerChat, 3, 3, 1),
+        (Dedupe::AllChats, 2, 2, 2),
+    ];
+    for (mode, kept, extracted, duplicates) in cases {
+        let out = tempfile::tempdir().unwrap();
+        let opts = Options {
+            dedupe: mode,
+            ..options(backup.path(), out.path(), None)
+        };
+        // Dry run reports the same counts without writing.
+        let dry = run(&Options {
+            dry_run: true,
+            ..opts.clone()
+        })
+        .unwrap();
+        assert_eq!((dry.extracted, dry.duplicates), (extracted, duplicates));
+        assert_eq!(listing(out.path()), Vec::<String>::new());
+
+        let first = run(&opts).unwrap();
+        assert_eq!(
+            (first.extracted, first.duplicates, first.up_to_date),
+            (extracted, duplicates, 0),
+            "{mode:?}"
+        );
+        let files = files_under(out.path());
+        assert_eq!(files.len(), kept, "{mode:?}: {files:?}");
+        // The earliest occurrence keeps its name; later copies are dropped.
+        let has = |f: &str| files.contains(&f.to_owned());
+        assert!(has("Alice/2023-03-06_00-00-00_001.jpg"));
+        assert_eq!(
+            has("Alice/2023-03-06_00-00-01_001.jpg"),
+            mode == Dedupe::Off
+        );
+        // No leftover .part files.
+        assert!(files.iter().all(|f| !f.contains(".part")));
+
+        // Re-run: present files are registered, so the outcome is identical.
+        let second = run(&opts).unwrap();
+        assert_eq!(
+            (second.extracted, second.duplicates, second.up_to_date),
+            (0, duplicates, extracted),
+            "{mode:?}"
+        );
+        assert_eq!(files_under(out.path()), files);
+    }
 }

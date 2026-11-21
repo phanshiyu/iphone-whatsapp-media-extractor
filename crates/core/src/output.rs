@@ -113,11 +113,10 @@ pub fn format_time(unix: i64, utc: bool, pattern: &str) -> String {
     ts.to_zoned_datetime(tz).strftime(pattern).to_string()
 }
 
-/// Decide folder and file names for every record. `records` must already be
-/// ordered by date then primary key (as returned by `whatsapp::load_media`).
+/// Folder name for every chat (by `chat_pk`), assigned in chat primary-key
+/// order so results are stable.
 #[must_use]
-pub fn plan(records: &[MediaRecord], utc: bool) -> Vec<PlannedFile> {
-    // Chat folders, assigned in chat primary-key order so results are stable.
+pub fn chat_dirs(records: &[MediaRecord]) -> HashMap<i64, String> {
     let mut chats: BTreeMap<i64, &MediaRecord> = BTreeMap::new();
     for r in records {
         chats.entry(r.chat_pk).or_insert(r);
@@ -143,6 +142,14 @@ pub fn plan(records: &[MediaRecord], utc: bool) -> Vec<PlannedFile> {
         taken.insert(name.to_lowercase());
         dirs.insert(*pk, name);
     }
+    dirs
+}
+
+/// Decide folder and file names for every record. `records` must already be
+/// ordered by date then primary key (as returned by `whatsapp::load_media`).
+#[must_use]
+pub fn plan(records: &[MediaRecord], utc: bool) -> Vec<PlannedFile> {
+    let dirs = chat_dirs(records);
 
     let mut seq: HashMap<(i64, i64), u32> = HashMap::new();
     records

@@ -1,10 +1,12 @@
 //! Background jobs; results come back over a channel.
 
 use iwme_core::backup::Backup;
-use iwme_core::device::{self, BackupInfo, Device, DeviceOptions};
-use iwme_core::{CancelToken, Options, Progress, Summary, run};
+use iwme_core::chats::ChatInfo;
+use iwme_core::device::{self, BackupInfo, BackupSource, Device, DeviceOptions};
+use iwme_core::{CancelToken, Extractor, Options, Progress, Summary};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 /// A connected device plus whether its backup will be encrypted.
@@ -19,6 +21,7 @@ pub struct DeviceEntry {
 pub enum Msg {
     Devices(Result<Vec<DeviceEntry>, anyhow::Error>),
     Backups(Result<Vec<BackupInfo>, anyhow::Error>),
+    Loaded(Result<Session, anyhow::Error>),
     Progress(Progress),
     Done(Result<Summary, anyhow::Error>),
 }
@@ -58,31 +61,41 @@ pub fn refresh_backups(tx: Sender<Msg>, ctx: egui::Context) {
     });
 }
 
-/// Everything a job needs.
+/// Everything a load job needs.
 #[derive(Debug)]
 pub struct Job {
     pub source: Source,
     pub options: Options,
 }
 
-pub fn start(job: Job, cancel: CancelToken, tx: Sender<Msg>, ctx: egui::Context) {
+/// An opened backup, kept between loading chats and extracting. Field order
+/// matters: the extractor (which has files open) drops before the temporary
+/// backup folder is deleted.
+#[derive(Debug)]
+pub struct Session {
+    pub extractor: Arc<Mutex<Extractor>>,
+    pub chats: Vec<ChatInfo>,
+    _source: BackupSource,
+}
+
+/// Back up the device if needed, open the backup and list its chats.
+pub fn load(job: Job, cancel: CancelToken, tx: Sender<Msg>, ctx: egui::Context) {
     thread::spawn(move || {
         let progress = {
             let (tx, ctx) = (tx.clone(), ctx.clone());
             move |p: Progress| send(&tx, &ctx, Msg::Progress(p))
         };
-        let result = execute(job, &cancel, &progress);
-        send(&tx, &ctx, Msg::Done(result));
+        let result = open_session(job, &cancel, &progress);
+        send(&tx, &ctx, Msg::Loaded(result));
     });
 }
 
-fn execute(
+fn open_session(
     job: Job,
     cancel: &CancelToken,
     progress: &dyn Fn(Progress),
-) -> Result<Summary, anyhow::Error> {
+) -> Result<Session, anyhow::Error> {
     let mut options = job.options;
-    // Keep the source alive (and the temp backup on disk) until the end.
     let source = match job.source {
         Source::Existing(path) => {
             if Backup::is_encrypted(&path)?
@@ -90,7 +103,7 @@ fn execute(
             {
                 Backup::verify_password(&path, pw)?;
             }
-            device::BackupSource::existing(path)
+            BackupSource::existing(path)
         }
         Source::Device(udid) => {
             let dev = DeviceOptions {
@@ -101,5 +114,32 @@ fn execute(
         }
     };
     options.backup_dir.clone_from(&source.path);
-    run(&options, cancel, progress)
+    let extractor = Extractor::open(&options, cancel, progress)?;
+    let chats = extractor.list_chats(options.include_status);
+    Ok(Session {
+        extractor: Arc::new(Mutex::new(extractor)),
+        chats,
+        _source: source,
+    })
+}
+
+/// Extract the chats selected in `options` from an opened session.
+pub fn extract(
+    extractor: Arc<Mutex<Extractor>>,
+    options: Options,
+    cancel: CancelToken,
+    tx: Sender<Msg>,
+    ctx: egui::Context,
+) {
+    thread::spawn(move || {
+        let progress = {
+            let (tx, ctx) = (tx.clone(), ctx.clone());
+            move |p: Progress| send(&tx, &ctx, Msg::Progress(p))
+        };
+        let result = extractor
+            .lock()
+            .map_err(|_| anyhow::anyhow!("an earlier extraction crashed"))
+            .and_then(|ex| ex.run(&options, &cancel, &progress));
+        send(&tx, &ctx, Msg::Done(result));
+    });
 }

@@ -1,13 +1,14 @@
 //! Reading an iOS (Finder/iTunes) backup: manifest, file lookup, decryption.
 
 use crate::crypto::cbc_decrypt_stream;
+use crate::dedupe::{ContentId, HashWriter};
 use crate::error::access_error;
 use crate::keybag::{ClassKeys, Keybag};
 use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Cursor};
+use std::io::{self, BufReader, BufWriter, Cursor, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -163,18 +164,48 @@ impl Backup {
     /// Copy (and decrypt, if needed) a backup file to `dest`.
     /// Returns the number of bytes written.
     pub fn copy_file_to(&self, entry: &FileEntry, dest: &Path) -> Result<u64> {
-        let src = self.stored_path(entry);
-        let input = File::open(&src)
-            .map_err(|e| access_error(e, &format!("cannot open {}", src.display())))?;
+        Ok(self.copy_impl(entry, dest, None)?.unwrap_or_default())
+    }
+
+    /// Like [`Self::copy_file_to`], but `keep` is shown the content identity
+    /// before the file is moved into place; if it returns false the copy is
+    /// discarded and `None` is returned.
+    pub fn copy_file_unless_duplicate(
+        &self,
+        entry: &FileEntry,
+        dest: &Path,
+        mut keep: impl FnMut(ContentId) -> bool,
+    ) -> Result<Option<u64>> {
+        self.copy_impl(entry, dest, Some(&mut keep))
+    }
+
+    /// Identity of a backup file's plaintext, without writing it anywhere.
+    pub fn content_id(&self, entry: &FileEntry) -> Result<ContentId> {
+        let mut w = HashWriter::new(io::sink());
+        self.decrypt_into(entry, &mut w)?;
+        Ok(w.finish().1)
+    }
+
+    fn copy_impl(
+        &self,
+        entry: &FileEntry,
+        dest: &Path,
+        keep: Option<&mut dyn FnMut(ContentId) -> bool>,
+    ) -> Result<Option<u64>> {
         let mut part = dest.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);
-        let result = self.copy_inner(entry, input, &part);
-        match result {
-            Ok(n) => {
+        match self.write_part(entry, &part, keep.is_some()) {
+            Ok((n, id)) => {
+                if let (Some(keep), Some(id)) = (keep, id)
+                    && !keep(id)
+                {
+                    let _ = fs::remove_file(&part);
+                    return Ok(None);
+                }
                 fs::rename(&part, dest)
                     .with_context(|| format!("cannot move into place: {}", dest.display()))?;
-                Ok(n)
+                Ok(Some(n))
             }
             Err(e) => {
                 let _ = fs::remove_file(&part);
@@ -183,10 +214,33 @@ impl Backup {
         }
     }
 
-    fn copy_inner(&self, entry: &FileEntry, input: File, part: &Path) -> Result<u64> {
-        let out = BufWriter::new(
-            File::create(part).with_context(|| format!("cannot create {}", part.display()))?,
-        );
+    fn write_part(
+        &self,
+        entry: &FileEntry,
+        part: &Path,
+        hashed: bool,
+    ) -> Result<(u64, Option<ContentId>)> {
+        let file =
+            File::create(part).with_context(|| format!("cannot create {}", part.display()))?;
+        let mut out = BufWriter::new(file);
+        if hashed {
+            let mut w = HashWriter::new(&mut out);
+            let n = self.decrypt_into(entry, &mut w)?;
+            let id = w.finish().1;
+            out.flush()?;
+            Ok((n, Some(id)))
+        } else {
+            let n = self.decrypt_into(entry, &mut out)?;
+            out.flush()?;
+            Ok((n, None))
+        }
+    }
+
+    /// Stream the plaintext of `entry` into `out`.
+    fn decrypt_into(&self, entry: &FileEntry, out: impl Write) -> Result<u64> {
+        let src = self.stored_path(entry);
+        let input = File::open(&src)
+            .map_err(|e| access_error(e, &format!("cannot open {}", src.display())))?;
         let mut input = BufReader::new(input);
         if let Some(keys) = &self.keys {
             let blob = entry

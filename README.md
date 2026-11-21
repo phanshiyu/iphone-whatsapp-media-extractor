@@ -33,8 +33,11 @@ The installer puts the app in `/Applications` (or `~/Applications`), the `iphone
 1. Open **iPhone WhatsApp Media Extractor** from Applications or Launchpad.
 2. Pick a source: **Back up my connected iPhone** (plug it in, unlock it, tap "Trust"), or **Use an existing backup** from Finder.
 3. Choose where to **Save to** (default `~/Desktop/WhatsApp Media`) and enter the backup password if asked.
-4. Click **Extract**. Progress is shown; you can cancel any time.
-5. Click **Show in Finder** when it is done.
+4. Click **Load chats**. Progress is shown; you can cancel any time.
+5. Tick the chats you want (all are ticked by default; use the search box, **Select all** / **Select none**) and click **Extract**.
+6. Click **Show in Finder** when it is done.
+
+Under **More options**, **Duplicates** can skip files with identical content, within each chat or across all chats. A temporary device backup is kept until you change the source, finish extracting or quit.
 
 ## Command line
 
@@ -56,6 +59,10 @@ Device mode backs up the **whole phone** to a temporary folder (free space rough
 | `--include-status` | Also extract status updates (skipped by default) |
 | `--utc` | Use UTC instead of local time in file names |
 | `--dry-run` | Show what would be done without writing |
+| `--dedupe <MODE>` | `off` (default), `per-chat` or `all-chats`: skip files whose content is identical to an earlier one (the first, oldest copy is kept) |
+| `--list-chats` | Print the chats with media (name, type, media count, last activity, JID) and exit; in device mode it backs up, lists, then cleans up |
+| `--chat <NAME_OR_JID>` | Only extract this chat; repeatable. Matches an exact JID, else the folder name (case-insensitive, exact then substring) |
+| `--exclude-chat <NAME_OR_JID>` | Leave this chat out; repeatable, same matching |
 | `--exif` | If `exiftool` is installed, also write date tags (jpg, jpeg, heic, png, mp4, mov) |
 
 From source: `cargo install --git https://github.com/phanshiyu/iphone-whatsapp-media-extractor iphone-whatsapp-media-extractor`
@@ -76,6 +83,7 @@ From source: `cargo install --git https://github.com/phanshiyu/iphone-whatsapp-m
 - Chat name is the contact or group name (falling back to the phone number), cleaned for all filesystems. Chats with the same name get ` (<number>)` appended.
 - `NNN` numbers messages sent in the same second so sorting by name is chronological. In groups the sender is appended (`Me` for your own messages).
 - File modified (and, on macOS, creation) times are set to the message time.
+- With `--dedupe`, duplicates are detected by size and SHA-256 of the content; files already in the output are registered too, so re-runs stay consistent. `--dry-run` hashes the backup's files to report duplicates, so it reads every file.
 - Re-running is safe: files already present with the same size are skipped and their timestamps repaired. (With EXIF writing, exiftool changes sizes, so those files are copied again.)
 
 ## Development
