@@ -1,0 +1,74 @@
+name: Auto release
+
+# Daily: if main has changes since the last release tag and CI is green on
+# that commit, bump the patch version, tag it and build/publish the release.
+on:
+  schedule:
+    - cron: "0 1 * * *" # 09:00 Asia/Singapore
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Bump and tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide and bump
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+          if [ -n "$last" ] && [ -z "$(git log --format=%H "$last"..HEAD)" ]; then
+            echo "No changes since $last; nothing to release."
+            exit 0
+          fi
+          sha=$(git rev-parse HEAD)
+          ci=$(gh run list --workflow ci.yml --commit "$sha" --json conclusion,status \
+                 -q '[.[] | select(.status == "completed")][0].conclusion' || true)
+          if [ "$ci" != "success" ]; then
+            echo "CI for $sha is '${ci:-missing}', not success; skipping release."
+            exit 0
+          fi
+          current=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          IFS=. read -r major minor patch <<< "$current"
+          # If the version was bumped by hand past the last tag, release it as-is.
+          if [ "v$current" = "$last" ]; then
+            next="$major.$minor.$((patch + 1))"
+          else
+            next="$current"
+          fi
+          sed -i "s/^version = \"$current\"/version = \"$next\"/" Cargo.toml
+          sed -i "s/path = \"crates\/core\", version = \"$current\"/path = \"crates\/core\", version = \"$next\"/" Cargo.toml
+          cargo update --workspace --offline 2>/dev/null || cargo update --workspace
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git commit -am "Release v$next"
+          fi
+          git tag -a "v$next" -m "v$next"
+          git push origin HEAD:main "v$next"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Build and publish
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    permissions:
+      contents: write
